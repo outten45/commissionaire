@@ -52,65 +52,17 @@ module Commissionaire
             # filename = args.shift
             local_opts = {}
             local_opts = args.shift unless args.empty?
-            results = Results.new
 
-            fastcsv_opts = { :headers => :first_row }.merge(local_opts[:fastcsv_opts] || {})
-            if local_opts[:filename]
-              csv_method = :foreach
-            else
-              csv_method = :parse
-            end
-            FCSV.send(csv_method, (local_opts[:filename] || local_opts[:csv_string]), fastcsv_opts) do |row|
-              obj = collector_build_or_find(row, opts)
-              unless obj.save
-                results.add(:success, row, obj.errors.full_messages)
-              end
-            end
-            
-            results
+            c = Collector.new(self, opts, local_opts)
+            c.parse
+            c.results
           end
         end
         
         include Commissionaire::Collect::InstanceMethods
-        extend Commissionaire::Collect::SingletonMethods
+        # extend Commissionaire::Collect::SingletonMethods
       end
       
-    end
-    
-    module SingletonMethods
-      
-      def collector_headers(mapping={})
-        if mapping.blank?
-          mapping = self.column_names.inject({}) { |hash, v| hash[v.to_s] = v.to_s; hash }
-        end
-        mapping
-      end
-      
-      def collector_find_for_key(key, row)
-        if key.respond_to?(:call)
-          key.call(row)
-        else
-          self.first(:conditions => { key.to_sym => row[key.to_s] })
-        end
-      end
-      
-      def collector_build_or_find(row, opts={})
-        key = opts[:key] || "id"
-        obj = collector_find_for_key(key, row)
-        obj = self.new unless obj
-        collector_set_attributes(obj, row, opts)
-      end
-      
-      def collector_set_attributes(obj, row, opts={})
-        mapping = collector_headers(opts[:mapping])
-        mapping.each do |csv_name, method_name|
-          if row[csv_name]
-            obj.send(:"#{method_name}=", row[csv_name])
-          end
-        end
-        obj
-      end
-  
     end
     
     module InstanceMethods
@@ -118,22 +70,28 @@ module Commissionaire
     end
     
     class Collector
-      attr_reader :opts, :local_opts
+      attr_reader :klass, :opts, :local_opts
       attr_accessor :results
       
-      def initialize(opts, local_opts)
+      def initialize(klass, opts, local_opts)
+        @klass = klass
         @opts = opts
         @local_opts = local_opts
         @results = Results.new
       end
       
       def parse
-        fastcsv_opts = { :headers => :first_row }.merge(local_opts[:fastcsv_opts] || {})
+        fastcsv_opts = ({ :headers => :first_row }.merge(local_opts[:fastcsv_opts] || {}))
+
         csv_method = (local_opts[:filename] ? :foreach : :parse)
-        
-        FCSV.send(csv_method, (local_opts[:filename] || local_opts[:csv_string]), fastcsv_opts) do |row|
+        file_or_csv_string = (local_opts[:filename] || local_opts[:csv_string])
+
+        FCSV.send(csv_method, file_or_csv_string, fastcsv_opts) do |row|
           obj = self.collector_build_or_find(row, opts)
-          unless obj.save
+          if obj.save
+            if local_opts[:for_row] and local_opts[:for_row].respond_to?(:call)
+              local_opts[:for_row].call(obj, row.to_hash)
+            end
             results.add(:success, row, obj.errors.full_messages)
           end
         end
@@ -142,7 +100,7 @@ module Commissionaire
       
       def collector_headers(mapping={})
         if mapping.blank?
-          mapping = self.column_names.inject({}) { |hash, v| hash[v.to_s] = v.to_s; hash }
+          mapping = klass.column_names.inject({}) { |hash, v| hash[v.to_s] = v.to_s; hash }
         end
         mapping
       end
@@ -150,22 +108,22 @@ module Commissionaire
       def collector_find_for_key(key, row)
         if key.respond_to?(:call)
           key.call(row)
-        else
-          self.first(:conditions => { key.to_sym => row[key.to_s] })
+        elsif row[key.to_s]
+          klass.first(:conditions => { key.to_sym => row[key.to_s] })
         end
       end
       
       def collector_build_or_find(row, opts={})
         key = opts[:key] || "id"
         obj = collector_find_for_key(key, row)
-        obj = self.new unless obj
+        obj = klass.new unless obj
         collector_set_attributes(obj, row, opts)
       end
       
       def collector_set_attributes(obj, row, opts={})
         mapping = collector_headers(opts[:mapping])
         mapping.each do |csv_name, method_name|
-          if row[csv_name]
+          if row[csv_name] and obj.respond_to?(:"#{method_name}=")
             obj.send(:"#{method_name}=", row[csv_name])
           end
         end
@@ -197,6 +155,14 @@ module Commissionaire
       #
       def add(type, input_row, error_messages)
         @messages << {:type => type, :input_row => input_row, :errors => error_messages}
+      end
+
+      def empty?
+        messages.empty?
+      end
+
+      def join(str)
+        messages.collect{|m| "#{m[:type]}: #{m[:errors]} (#{m[:input_row]})"}.join(str)
       end
       
     end
